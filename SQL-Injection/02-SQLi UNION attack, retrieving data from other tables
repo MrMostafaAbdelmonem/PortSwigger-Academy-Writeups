@@ -1,0 +1,109 @@
+# SQL Injection UNION Attack — Retrieving Data from Other Tables
+
+**Lab:** PortSwigger Web Security Academy — SQL injection UNION attack, retrieving data from other tables
+**Category:** SQL Injection
+**Difficulty:** Practitioner
+**Objective:** Use a UNION-based SQL injection to extract usernames and passwords from an unrelated `users` table, then log in as the `administrator`.
+
+---
+
+## 1. Reconnaissance
+
+The lab is a simple e-commerce style store where products are filtered by category. When you open the lab and pick a category — in this case **Gifts** — the app builds the URL like this:
+
+```
+https://<lab-id>.web-security-academy.net/filter?category=Gifts
+```
+
+This tells us the `category` parameter is being used somewhere in a backend SQL query, most likely inside a `WHERE` clause that filters products by category. This is our injection point.
+
+## 2. Confirming the Number of Columns
+
+Before doing anything else with a `UNION` attack, the number of columns returned by the original query has to match the number of columns in the `UNION SELECT` we add — otherwise the database will reject the query.
+
+The database type behind the lab isn't given up front, and it could be MySQL, PostgreSQL, or Microsoft SQL Server (Oracle is treated separately here since its `UNION` syntax requires a `FROM dual` clause and behaves differently from the rest). Since nothing suggested Oracle, the payload style below was used first.
+
+Payload:
+
+```
+Gifts' UNION SELECT NULL--
+```
+
+Full URL:
+
+```
+https://<lab-id>.web-security-academy.net/filter?category=Gifts'UNION+SELECT+NULL+--
+```
+
+**Breaking the payload down:**
+
+| Part | Purpose |
+|---|---|
+| `'` | Closes the string value of the original `category` parameter so injected SQL can begin |
+| `UNION` | Combines the results of two `SELECT` statements into a single result set |
+| `SELECT NULL` | A placeholder column used to test how many columns the original query expects. `NULL` is used because it's compatible with virtually any column type, so it won't throw a type-mismatch error |
+| `--` | Comments out anything that follows in the original query, so the rest of the original SQL (like a trailing quote) doesn't break the syntax |
+
+Submitting this with a single `NULL` returned an **"Internal Server Error"**, which means the original query returns more than one column and the column count didn't match.
+
+`NULL` values were then added one at a time:
+
+```
+Gifts' UNION SELECT NULL,NULL--
+```
+
+This process continued until the page loaded normally with no error, at which point the number of `NULL`s used equals the number of columns in the original query. Once the request succeeded and the page rendered normally, this confirmed both the correct column count **and** that the results of the `UNION SELECT` were actually being reflected on the page — meaning this point wasn't just injectable, it was also exploitable for data extraction.
+
+## 3. Extracting Data from the `users` Table
+
+Since the lab description names the target table and columns directly — `users` table, with `username` and `password` columns — the next step was to replace the placeholder `NULL` values with these column names instead of guessing the schema.
+
+Payload:
+
+```
+Gifts' UNION SELECT username, password FROM users--
+```
+
+Full URL:
+
+```
+https://<lab-id>.web-security-academy.net/filter?category=Gifts'UNION+SELECT+username,password+from+users+--
+```
+
+This worked because the number of columns (2) matched what was confirmed in the previous step, so the database happily appended the results of `SELECT username, password FROM users` to the product listing.
+
+## 4. Result
+
+The response page rendered every row from the `users` table directly into the storefront, listing every username and password pair in the database — including the administrator account:
+
+```
+administrator : 2p4jlrcbo70ffhd2pnkk
+```
+
+## 5. Exploitation
+
+With valid administrator credentials in hand, the next step was straightforward:
+
+1. Navigate to **My Account**.
+2. Log in using:
+   - **Username:** `administrator`
+   - **Password:** `2p4jlrcbo70ffhd2pnkk`
+
+Login succeeded as `administrator`, and the lab was marked as **solved**.
+
+---
+
+## Summary
+
+This lab demonstrates a classic **UNION-based SQL injection**: once an injectable parameter is found, the attacker first determines the number of columns the original query returns (using incrementing `NULL` placeholders), confirms which of those columns are reflected back in the response, and then swaps the placeholders for a `SELECT` against an entirely unrelated table. Because the database has no concept of "this data belongs to a different table than the one the developer intended to query," any table the application's database user has read access to — including a `users` table holding credentials — becomes fair game.
+
+## Root Cause
+
+The application concatenates user-supplied input (`category`) directly into a SQL query without parameterization or input sanitization, allowing arbitrary SQL to be injected and executed with the privileges of the application's database account.
+
+## Remediation
+
+- Use **parameterized queries / prepared statements** for all database access — never concatenate user input into SQL strings.
+- Apply the **principle of least privilege** to the database account used by the application, so even if injection occurs, sensitive tables like `users` aren't readable.
+- Use an ORM or query builder that enforces parameterization by default.
+- Validate and allow-list expected input (e.g., category names should match a known, fixed set of values).
